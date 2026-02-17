@@ -34,7 +34,16 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Clone source website
-        run: git clone --depth 1 "${SOURCE_REPO}" source-site
+        env:
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          CLONE_URL="${SOURCE_REPO}"
+          if [ -n "${SOURCE_REPO_TOKEN:-}" ]; then
+            # If the source repo is private, use a PAT (classic) or fine-grained token.
+            CLONE_URL="${SOURCE_REPO/https:\/\/github.com/https:\/\/x-access-token:${SOURCE_REPO_TOKEN}@github.com}"
+          fi
+          GIT_TERMINAL_PROMPT=0 git clone --depth 1 "${CLONE_URL}" source-site
 
       - name: Install dependencies
         working-directory: source-site
