@@ -20,7 +20,7 @@ permissions:
   id-token: write
 
 env:
-  NODE_VERSION: "20"
+  NODE_VERSION: "18"
   SOURCE_REPO: ${{ github.event.inputs.source_repo || 'https://github.com/colesgroup-cloudengineering/super-specials-jimmyy.git' }}
   STAGING_PATH: ${{ github.event.inputs.staging_path || 'superspecials-staging' }}
 
