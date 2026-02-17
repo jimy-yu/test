@@ -1,0 +1,107 @@
+name: Deploy Super Specials (Azure Storage)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Override Gatsby source repo (optional)"
+        required: false
+        default: "https://github.com/colesgroup-cloudengineering/super-specials-jimmyy.git"
+      staging_path:
+        description: "Staging path segment (optional)"
+        required: false
+        default: "superspecials-staging"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  NODE_VERSION: "20"
+  SOURCE_REPO: ${{ github.event.inputs.source_repo || 'https://github.com/colesgroup-cloudengineering/super-specials-jimmyy.git' }}
+  STAGING_PATH: ${{ github.event.inputs.staging_path || 'superspecials-staging' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Clone source website
+        run: git clone --depth 1 "${SOURCE_REPO}" source-site
+
+      - name: Install dependencies
+        working-directory: source-site
+        run: npm install
+
+      - name: Build Gatsby static files
+        working-directory: source-site
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gatsby-public
+          path: source-site/public
+          if-no-files-found: error
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build
+    # Approval gate is handled by GitHub Environments, not tags.
+    environment: staging
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gatsby-public
+          path: ./public
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to staging static website
+        run: |
+          az storage blob upload-batch \
+            --account-name "${{ secrets.STAGING_STORAGE_ACCOUNT }}" \
+            --destination '$web' \
+            --destination-path "${STAGING_PATH}" \
+            --source "./public" \
+            --auth-mode login
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    # Approval gate is handled by GitHub Environments, not tags.
+    environment: production
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gatsby-public
+          path: ./public
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to production static website
+        run: |
+          az storage blob upload-batch \
+            --account-name "${{ secrets.PROD_STORAGE_ACCOUNT }}" \
+            --destination '$web' \
+            --source "./public" \
+            --auth-mode login
