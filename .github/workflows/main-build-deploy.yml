@@ -22,14 +22,6 @@ on:
         description: "Staging path segment (optional)"
         required: false
         default: "superspecials-staging"
-      staging_storage_account:
-        description: "Staging storage account name (optional, overrides secret)"
-        required: false
-        default: "st"
-      prod_storage_account:
-        description: "Production storage account name (optional, overrides secret)"
-        required: false
-        default: ""
 
 permissions:
   contents: read
@@ -40,8 +32,6 @@ env:
   SOURCE_REPO: ${{ github.event.inputs.source_repo || 'https://github.com/colesgroup-cloudengineering/super-specials-jimmyy.git' }}
   STAGING_PATH: ${{ github.event.inputs.staging_path || 'superspecials-staging' }}
   NODE_OPTIONS: "--openssl-legacy-provider"
-  STAGING_STORAGE_ACCOUNT: ${{ github.event.inputs.staging_storage_account || secrets.STAGING_STORAGE_ACCOUNT }}
-  PROD_STORAGE_ACCOUNT: ${{ github.event.inputs.prod_storage_account || secrets.PROD_STORAGE_ACCOUNT }}
 
 jobs:
   terraform-validate:
@@ -64,7 +54,7 @@ jobs:
         run: |
           terraform init -backend=false
           terraform validate
-  
+
   terraform-plan:
     runs-on: ubuntu-latest
     needs: terraform-validate
@@ -76,6 +66,10 @@ jobs:
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+      TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+      TFSTATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER }}
+      TFSTATE_KEY: ${{ vars.TFSTATE_KEY }}
     steps:
       - name: Checkout challenge repo
         uses: actions/checkout@v4
@@ -95,7 +89,15 @@ jobs:
       - name: Terraform plan
         working-directory: infra
         run: |
-          terraform init
+          if [ -z "${TFSTATE_RESOURCE_GROUP}" ] || [ -z "${TFSTATE_STORAGE_ACCOUNT}" ] || [ -z "${TFSTATE_CONTAINER}" ] || [ -z "${TFSTATE_KEY}" ]; then
+            echo "TFSTATE_* secrets are required for remote state."
+            exit 1
+          fi
+          terraform init \
+            -backend-config="resource_group_name=${TFSTATE_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${TFSTATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${TFSTATE_CONTAINER}" \
+            -backend-config="key=${TFSTATE_KEY}"
           terraform plan -out=tfplan
 
       - name: Upload plan artifact
@@ -110,11 +112,18 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.terraform_apply == 'true' }}
     # Manual approval via GitHub Environment. Use remote state in production.
     environment: infra
+    outputs:
+      staging_storage_account: ${{ steps.tfoutputs.outputs.staging_storage_account }}
+      prod_storage_account: ${{ steps.tfoutputs.outputs.prod_storage_account }}
     env:
       ARM_USE_OIDC: "true"
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TFSTATE_RESOURCE_GROUP: ${{ secrets.TFSTATE_RESOURCE_GROUP }}
+      TFSTATE_STORAGE_ACCOUNT: ${{ secrets.TFSTATE_STORAGE_ACCOUNT }}
+      TFSTATE_CONTAINER: ${{ secrets.TFSTATE_CONTAINER }}
+      TFSTATE_KEY: ${{ secrets.TFSTATE_KEY }}
     steps:
       - name: Checkout challenge repo
         uses: actions/checkout@v4
@@ -140,8 +149,34 @@ jobs:
       - name: Terraform apply
         working-directory: infra
         run: |
-          terraform init
+          if [ -z "${TFSTATE_RESOURCE_GROUP}" ] || [ -z "${TFSTATE_STORAGE_ACCOUNT}" ] || [ -z "${TFSTATE_CONTAINER}" ] || [ -z "${TFSTATE_KEY}" ]; then
+            echo "TFSTATE_* secrets are required for remote state."
+            exit 1
+          fi
+          terraform init \
+            -backend-config="resource_group_name=${TFSTATE_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${TFSTATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${TFSTATE_CONTAINER}" \
+            -backend-config="key=${TFSTATE_KEY}"
           terraform apply -auto-approve tfplan
+
+      - name: Capture Terraform outputs
+        id: tfoutputs
+        working-directory: infra
+        run: |
+          terraform output -json > tf-outputs.json
+          STAGING_NAME="$(jq -r '.staging_storage_account_name.value' tf-outputs.json)"
+          PROD_NAME="$(jq -r '.production_storage_account_name.value' tf-outputs.json)"
+          if [ -z "${STAGING_NAME}" ] || [ "${STAGING_NAME}" = "null" ]; then
+            echo "Missing staging_storage_account_name output"
+            exit 1
+          fi
+          if [ -z "${PROD_NAME}" ] || [ "${PROD_NAME}" = "null" ]; then
+            echo "Missing production_storage_account_name output"
+            exit 1
+          fi
+          echo "staging_storage_account=${STAGING_NAME}" >> "$GITHUB_OUTPUT"
+          echo "prod_storage_account=${PROD_NAME}" >> "$GITHUB_OUTPUT"
 
   build:
     runs-on: ubuntu-latest
@@ -181,9 +216,12 @@ jobs:
 
   deploy-staging:
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, terraform-apply]
+    if: ${{ needs.terraform-apply.result == 'success' }}
     # Approval gate is handled by GitHub Environments, not tags.
     environment: staging
+    env:
+      STAGING_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.staging_storage_account }}
     steps:
       - name: Download build artifact
         uses: actions/download-artifact@v4
@@ -201,11 +239,11 @@ jobs:
       - name: Deploy to staging static website
         run: |
           if [ -z "${STAGING_STORAGE_ACCOUNT}" ]; then
-            echo "STAGING_STORAGE_ACCOUNT is empty. Set it as a secret or workflow input."
+            echo "STAGING_STORAGE_ACCOUNT output is empty."
             exit 1
           fi
           az storage blob upload-batch \
-            --account-name "${{ secrets.STAGING_STORAGE_ACCOUNT }}" \
+            --account-name "${STAGING_STORAGE_ACCOUNT}" \
             --destination '$web' \
             --destination-path "${STAGING_PATH}" \
             --source "./public" \
@@ -216,6 +254,8 @@ jobs:
     needs: deploy-staging
     # Approval gate is handled by GitHub Environments, not tags.
     environment: production
+    env:
+      PROD_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.prod_storage_account }}
     steps:
       - name: Download build artifact
         uses: actions/download-artifact@v4
@@ -233,11 +273,11 @@ jobs:
       - name: Deploy to production static website
         run: |
           if [ -z "${PROD_STORAGE_ACCOUNT}" ]; then
-            echo "PROD_STORAGE_ACCOUNT is empty. Set it as a secret or workflow input."
+            echo "PROD_STORAGE_ACCOUNT output is empty."
             exit 1
           fi
           az storage blob upload-batch \
-            --account-name "${{ secrets.PROD_STORAGE_ACCOUNT }}" \
+            --account-name "${PROD_STORAGE_ACCOUNT}" \
             --destination '$web' \
             --source "./public" \
             --auth-mode login
