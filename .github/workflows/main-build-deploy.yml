@@ -93,6 +93,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: terraform-validate
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.terraform_plan == 'true' }}
+     # Use infra environment so OIDC subject matches federated credentials.
+    environment: infra
     env:
       ARM_USE_OIDC: "true"
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
