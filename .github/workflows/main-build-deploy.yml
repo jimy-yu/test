@@ -22,6 +22,14 @@ on:
         description: "Staging path segment (optional)"
         required: false
         default: "superspecials-staging"
+      staging_storage_account:
+        description: "Staging storage account name (optional, overrides secret)"
+        required: false
+        default: "st"
+      prod_storage_account:
+        description: "Production storage account name (optional, overrides secret)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -32,6 +40,8 @@ env:
   SOURCE_REPO: ${{ github.event.inputs.source_repo || 'https://github.com/colesgroup-cloudengineering/super-specials-jimmyy.git' }}
   STAGING_PATH: ${{ github.event.inputs.staging_path || 'superspecials-staging' }}
   NODE_OPTIONS: "--openssl-legacy-provider"
+  STAGING_STORAGE_ACCOUNT: ${{ github.event.inputs.staging_storage_account || secrets.STAGING_STORAGE_ACCOUNT }}
+  PROD_STORAGE_ACCOUNT: ${{ github.event.inputs.prod_storage_account || secrets.PROD_STORAGE_ACCOUNT }}
 
 jobs:
   terraform-validate:
@@ -190,6 +200,10 @@ jobs:
 
       - name: Deploy to staging static website
         run: |
+          if [ -z "${STAGING_STORAGE_ACCOUNT}" ]; then
+            echo "STAGING_STORAGE_ACCOUNT is empty. Set it as a secret or workflow input."
+            exit 1
+          fi
           az storage blob upload-batch \
             --account-name "${{ secrets.STAGING_STORAGE_ACCOUNT }}" \
             --destination '$web' \
@@ -218,6 +232,10 @@ jobs:
 
       - name: Deploy to production static website
         run: |
+          if [ -z "${PROD_STORAGE_ACCOUNT}" ]; then
+            echo "PROD_STORAGE_ACCOUNT is empty. Set it as a secret or workflow input."
+            exit 1
+          fi
           az storage blob upload-batch \
             --account-name "${{ secrets.PROD_STORAGE_ACCOUNT }}" \
             --destination '$web' \
