@@ -183,6 +183,23 @@ jobs:
         working-directory: source-site
         run: npm run build
 
+      - name: Create staging approvals page
+        working-directory: source-site
+        run: |
+          mkdir -p "public/${STAGING_PATH}"
+          cat > "public/${STAGING_PATH}/approve.html" << EOF
+          <!doctype html>
+          <html>
+            <head><meta charset="utf-8"><title>Staging Approval</title></head>
+            <body style="font-family: Arial">
+              <h2>Staging approvals</h2>
+              <p><b>Run:</b> ${GITHUB_RUN_NUMBER}</p>
+              <p><b>Commit:</b> ${GITHUB_SHA}</p>
+              <p>Validate staging, then approve the next stage in GitHub Actions.</p>
+            </body>
+          </html>
+          EOF
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
