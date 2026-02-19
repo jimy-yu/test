@@ -1,0 +1,331 @@
+name: SuperSpecials (Build & Deploy)
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Gatsby source repo"
+        # Allow overriding the source repo without2aaa changing code.
+        required: false
+        default: "https://github.com/colesgroup-cloudengineering/super-specials-jimmyy.git"
+      staging_path:
+        # Keep staging URL requirement in the path, not the domain.
+        description: "Staging path segment"
+        required: false
+        default: "superspecials-staging"
+
+permissions:
+  # Minimum required permissions: read repo + OIDC token for Azure auth.
+  contents: read
+  id-token: write
+
+env:
+  # Node 18 + legacy provider prevents Gatsby/Webpack OpenSSL errors.
+  NODE_VERSION: "24"
+  SOURCE_REPO: ${{ github.event.inputs.source_repo || 'https://github.com/colesgroup-cloudengineering/super-specials-jimmyy.git' }}
+  STAGING_PATH: ${{ github.event.inputs.staging_path || 'superspecials-staging' }}
+  NODE_OPTIONS: "--openssl-legacy-provider" # https://nodejs.org/api/cli.html temporary solution, TODO: remove MD4 dependency 
+
+jobs:
+  terraform-plan:
+    runs-on: ubuntu-latest
+    # needs: terraform-validate
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    # Use a non-approval environment so plan can run before manual approval.
+    environment: infra-plan # create env in repo setting
+    env:
+      # OIDC auth for azurerm provider (no client secret).
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+      TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+      TFSTATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER }}
+      TFSTATE_KEY: ${{ vars.TFSTATE_KEY }}
+    steps:
+      - name: Checkout challenge repo
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.6"
+
+      - name: Terraform fmt
+        working-directory: infra
+        run: terraform fmt -check
+
+      - name: Terraform plan
+        working-directory: infra
+        run: |
+          # Remote state is required for CI to keep plan/apply consistent.
+          if [ -z "${TFSTATE_RESOURCE_GROUP}" ] || [ -z "${TFSTATE_STORAGE_ACCOUNT}" ] || [ -z "${TFSTATE_CONTAINER}" ] || [ -z "${TFSTATE_KEY}" ]; then
+            echo "TFSTATE_* variables are required for remote state (repo or environment variables)."
+            exit 1
+          fi
+          terraform init \
+            -backend-config="resource_group_name=${TFSTATE_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${TFSTATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${TFSTATE_CONTAINER}" \
+            -backend-config="key=${TFSTATE_KEY}"
+          terraform validate
+          terraform plan -out=tfplan
+      # Carry the exact plan into apply to avoid drift between steps.
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: infra/tfplan
+
+  terraform-apply:
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    if: ${{ needs.terraform-plan.result == 'success' }}
+    # Manual approval via GitHub Environment. Use remote state in production.
+    environment: infra
+    outputs:
+      # Expose outputs for deploy jobs so we don't duplicate naming logic.
+      staging_storage_account: ${{ steps.tfoutputs.outputs.staging_storage_account }}
+      prod_storage_account: ${{ steps.tfoutputs.outputs.prod_storage_account }}
+      staging_site_url: ${{ steps.tfoutputs.outputs.staging_site_url }}
+      production_site_url: ${{ steps.tfoutputs.outputs.production_site_url }}
+    env:
+      # OIDC auth for azurerm provider (no client secret).
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+      TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+      TFSTATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER }}
+      TFSTATE_KEY: ${{ vars.TFSTATE_KEY }}
+    steps:
+      - name: Checkout challenge repo
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.6"
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: infra
+
+      - name: Terraform apply
+        working-directory: infra
+        run: |
+          # Apply the exact plan created in the previous job.
+          if [ -z "${TFSTATE_RESOURCE_GROUP}" ] || [ -z "${TFSTATE_STORAGE_ACCOUNT}" ] || [ -z "${TFSTATE_CONTAINER}" ] || [ -z "${TFSTATE_KEY}" ]; then
+            echo "TFSTATE_* variables are required for remote state (repo or environment variables)."
+            exit 1
+          fi
+          terraform init \
+            -backend-config="resource_group_name=${TFSTATE_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${TFSTATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${TFSTATE_CONTAINER}" \
+            -backend-config="key=${TFSTATE_KEY}"
+          terraform apply -auto-approve tfplan
+
+      - name: Capture Terraform outputs
+        id: tfoutputs
+        working-directory: infra
+        run: |
+          # Pipe outputs to downstream deploy jobs (storage names + URLs).
+          terraform output -json > tf-outputs.json
+          # Extract values once and fail fast if anything is missing.
+          STAGING_NAME="$(jq -r '.staging_storage_account_name.value' tf-outputs.json)"
+          PROD_NAME="$(jq -r '.production_storage_account_name.value' tf-outputs.json)"
+          STAGING_URL="$(jq -r '.staging_site_url.value' tf-outputs.json)"
+          PROD_URL="$(jq -r '.production_site_url.value' tf-outputs.json)"
+          if [ -z "${STAGING_NAME}" ] || [ "${STAGING_NAME}" = "null" ]; then
+            # Without these outputs the deploy jobs cannot target the right account.
+            echo "Missing staging_storage_account_name output"
+            exit 1
+          fi
+          if [ -z "${PROD_NAME}" ] || [ "${PROD_NAME}" = "null" ]; then
+            echo "Missing production_storage_account_name output"
+            exit 1
+          fi
+          if [ -z "${STAGING_URL}" ] || [ "${STAGING_URL}" = "null" ]; then
+            echo "Missing staging_site_url output"
+            exit 1
+          fi
+          if [ -z "${PROD_URL}" ] || [ "${PROD_URL}" = "null" ]; then
+            echo "Missing production_site_url output"
+            exit 1
+          fi
+           # Export for later jobs via GitHub Actions job outputs.
+          echo "staging_storage_account=${STAGING_NAME}" >> "$GITHUB_OUTPUT"
+          echo "prod_storage_account=${PROD_NAME}" >> "$GITHUB_OUTPUT"
+          echo "staging_site_url=${STAGING_URL}" >> "$GITHUB_OUTPUT"
+          echo "production_site_url=${PROD_URL}" >> "$GITHUB_OUTPUT"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: terraform-apply
+    if: ${{ needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped' }}
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Clone source website
+        env:
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          CLONE_URL="${SOURCE_REPO}"
+          if [ -n "${SOURCE_REPO_TOKEN:-}" ]; then
+            # If the source repo is private, use a PAT (classic) or fine-grained token.
+            CLONE_URL="${SOURCE_REPO/https:\/\/github.com/https:\/\/x-access-token:${SOURCE_REPO_TOKEN}@github.com}"
+          fi
+          GIT_TERMINAL_PROMPT=0 git clone --depth 1 "${CLONE_URL}" source-site
+
+      - name: Install dependencies
+        working-directory: source-site
+        run: npm install
+
+      - name: Build Gatsby static files
+        working-directory: source-site
+        run: npm run build
+
+      - name: Create staging approvals page
+        working-directory: source-site
+        run: |
+          # Stretch goal: serve an approvals page under superspecials-staging.
+          mkdir -p "public/${STAGING_PATH}"
+          cat > "public/${STAGING_PATH}/approve.html" << EOF
+          <!doctype html>
+          <html>
+            <head><meta charset="utf-8"><title>Staging Approval</title></head>
+            <body style="font-family: Arial">
+              <h2>Staging approvals</h2>
+              <p><b>Run:</b> ${GITHUB_RUN_NUMBER}</p>
+              <p><b>Commit:</b> ${GITHUB_SHA}</p>
+              <p>Validate staging, then approve the next stage in GitHub Actions.</p>
+            </body>
+          </html>
+          EOF
+
+      - name: Upload build artifact
+      # Artifact is re-used by both staging + production deploy steps.
+        uses: actions/upload-artifact@v4
+        with:
+          name: gatsby-public
+          path: source-site/public
+          if-no-files-found: error
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [build, terraform-apply]
+    if: ${{ needs.build.result == 'success' && (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
+    # Approval gate is handled by GitHub Environments, not tags.
+    environment: 
+      name: staging
+      # Link the approvals page for reviewers.
+      url: ${{ needs.terraform-apply.outputs.staging_site_url || format('https://{0}.web.core.windows.net/{1}/', vars.STAGING_STORAGE_ACCOUNT, env.STAGING_PATH) }}approve.html
+    env:
+      STAGING_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.staging_storage_account || vars.STAGING_STORAGE_ACCOUNT }}
+      STAGING_SITE_URL: ${{ needs.terraform-apply.outputs.staging_site_url }}
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gatsby-public
+          path: ./public
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to staging static website
+        run: |
+          # Upload to the $web container and keep the staging path under it.
+          if [ -z "${STAGING_STORAGE_ACCOUNT}" ]; then
+            echo "STAGING_STORAGE_ACCOUNT is empty. Set vars.STAGING_STORAGE_ACCOUNT or run terraform_apply."
+            exit 1
+          fi
+          az storage blob upload-batch \
+            --account-name "${STAGING_STORAGE_ACCOUNT}" \
+            --destination '$web' \
+            --source "./public" \
+            --auth-mode login \
+            --overwrite
+
+      - name: Output staging URL
+        run: |
+          STAGING_URL="${STAGING_SITE_URL}"
+          APPROVE_URL="${STAGING_SITE_URL}/${STAGING_PATH}/approve.html"
+          echo "Staging URL: ${STAGING_URL}"
+          echo "Approvals URL: ${APPROVE_URL}"
+          echo "### Staging URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "${STAGING_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Approvals URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "${APPROVE_URL}" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, terraform-apply]
+    # Approval gate is handled by GitHub Environments, not tags.
+    environment: production
+    env:
+      PROD_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.prod_storage_account || vars.PROD_STORAGE_ACCOUNT }}
+      PROD_SITE_URL: ${{ needs.terraform-apply.outputs.production_site_url }}
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gatsby-public
+          path: ./public
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to production static website
+        run: |
+          # Production deploy re-uses the same build artifact.
+          if [ -z "${PROD_STORAGE_ACCOUNT}" ]; then
+            echo "PROD_STORAGE_ACCOUNT is empty. Set vars.PROD_STORAGE_ACCOUNT or run terraform_apply."
+            exit 1
+          fi
+          az storage blob upload-batch \
+            --account-name "${PROD_STORAGE_ACCOUNT}" \
+            --destination '$web' \
+            --source "./public" \
+            --auth-mode login \
+            --overwrite
+
+      - name: Output production URL
+        run: |
+          PROD_URL="${PROD_SITE_URL}"
+          echo "Production URL: ${PROD_URL}"
+          echo "### Production URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "${PROD_URL}" >> "$GITHUB_STEP_SUMMARY"
