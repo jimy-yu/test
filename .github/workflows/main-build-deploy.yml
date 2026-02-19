@@ -223,7 +223,8 @@ jobs:
             --destination '$web' \
             --destination-path "${STAGING_PATH}" \
             --source "./public" \
-            --auth-mode login
+            --auth-mode login \
+            --overwrite
 
   deploy-production:
     runs-on: ubuntu-latest
@@ -256,4 +257,5 @@ jobs:
             --account-name "${PROD_STORAGE_ACCOUNT}" \
             --destination '$web' \
             --source "./public" \
-            --auth-mode login
+            --auth-mode login \
+            --overwrite
