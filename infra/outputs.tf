@@ -15,5 +15,5 @@ output "production_site_url" {
 
 output "staging_site_url" {
   description = "Staging URL includes superspecials-staging in the path."
-  value       = "${azurerm_storage_account.site["staging"].primary_web_endpoint}${local.staging_path}/"
+  value       = azurerm_storage_account.site["staging"].primary_web_endpoint
 }
