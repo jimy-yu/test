@@ -40,10 +40,13 @@ resource "azurerm_storage_account" "site" {
   # This challenge requires a public static website URL; allow public access.
   allow_nested_items_to_be_public = true
 
-  static_website {
-    index_document     = "index.html"
-    error_404_document = "404.html"
-  }
-
   tags = each.value.tags
+}
+
+# Configure Static Website using the dedicated resource (per official provider docs).
+resource "azurerm_storage_account_static_website" "site" {
+  for_each           = azurerm_storage_account.site
+  storage_account_id = each.value.id
+  index_document     = "index.html"
+  error_404_document = "404.html"
 }
