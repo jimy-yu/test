@@ -214,7 +214,7 @@ jobs:
     # Approval gate is handled by GitHub Environments, not tags.
     environment: 
       name: staging
-      url: https://${{ needs.terraform-apply.outputs.staging_storage_account }}.web.core.windows.net/${{ env.STAGING_PATH }}/approve.html
+      url: https://${{ needs.terraform-apply.outputs.staging_storage_account || vars.STAGING_STORAGE_ACCOUNT }}.web.core.windows.net/${{ env.STAGING_PATH }}/approve.html
     env:
       STAGING_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.staging_storage_account || vars.STAGING_STORAGE_ACCOUNT }}
     steps:
@@ -243,6 +243,17 @@ jobs:
             --source "./public" \
             --auth-mode login \
             --overwrite
+
+      - name: Output staging URL
+        run: |
+          STAGING_URL="https://${STAGING_STORAGE_ACCOUNT}.web.core.windows.net/${STAGING_PATH}/"
+          APPROVE_URL="https://${STAGING_STORAGE_ACCOUNT}.web.core.windows.net/${STAGING_PATH}/approve.html"
+          echo "Staging URL: ${STAGING_URL}"
+          echo "Approvals URL: ${APPROVE_URL}"
+          echo "### Staging URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "${STAGING_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Approvals URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "${APPROVE_URL}" >> "$GITHUB_STEP_SUMMARY"
 
   deploy-production:
     runs-on: ubuntu-latest
@@ -277,3 +288,10 @@ jobs:
             --source "./public" \
             --auth-mode login \
             --overwrite
+
+      - name: Output production URL
+        run: |
+          PROD_URL="https://${PROD_STORAGE_ACCOUNT}.web.core.windows.net/"
+          echo "Production URL: ${PROD_URL}"
+          echo "### Production URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "${PROD_URL}" >> "$GITHUB_STEP_SUMMARY"
