@@ -1,0 +1,8 @@
+location    = "australiaeast"
+app_name    = "superspecials"
+name_suffix = "01"
+
+tags = {
+  owner     = "your-name"
+  challenge = "coles-devops"
+}

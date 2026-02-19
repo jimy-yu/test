@@ -16,7 +16,7 @@ variable "app_name" {
 }
 
 variable "name_suffix" {
-  description = "Optional lowercase letters/digits suffix to keep Storage Account names unique."
+  description = "Lowercase letters/digits only; short suffix to keep Storage Account names <= 24 chars."
   type        = string
   default     = "01"
 
