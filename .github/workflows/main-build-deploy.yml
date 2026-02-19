@@ -90,6 +90,8 @@ jobs:
     outputs:
       staging_storage_account: ${{ steps.tfoutputs.outputs.staging_storage_account }}
       prod_storage_account: ${{ steps.tfoutputs.outputs.prod_storage_account }}
+      staging_site_url: ${{ steps.tfoutputs.outputs.staging_site_url }}
+      production_site_url: ${{ steps.tfoutputs.outputs.production_site_url }}
     env:
       ARM_USE_OIDC: "true"
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -142,6 +144,8 @@ jobs:
           terraform output -json > tf-outputs.json
           STAGING_NAME="$(jq -r '.staging_storage_account_name.value' tf-outputs.json)"
           PROD_NAME="$(jq -r '.production_storage_account_name.value' tf-outputs.json)"
+          STAGING_URL="$(jq -r '.staging_site_url.value' tf-outputs.json)"
+          PROD_URL="$(jq -r '.production_site_url.value' tf-outputs.json)"
           if [ -z "${STAGING_NAME}" ] || [ "${STAGING_NAME}" = "null" ]; then
             echo "Missing staging_storage_account_name output"
             exit 1
@@ -150,8 +154,18 @@ jobs:
             echo "Missing production_storage_account_name output"
             exit 1
           fi
+          if [ -z "${STAGING_URL}" ] || [ "${STAGING_URL}" = "null" ]; then
+            echo "Missing staging_site_url output"
+            exit 1
+          fi
+          if [ -z "${PROD_URL}" ] || [ "${PROD_URL}" = "null" ]; then
+            echo "Missing production_site_url output"
+            exit 1
+          fi
           echo "staging_storage_account=${STAGING_NAME}" >> "$GITHUB_OUTPUT"
           echo "prod_storage_account=${PROD_NAME}" >> "$GITHUB_OUTPUT"
+          echo "staging_site_url=${STAGING_URL}" >> "$GITHUB_OUTPUT"
+          echo "production_site_url=${PROD_URL}" >> "$GITHUB_OUTPUT"
 
   build:
     runs-on: ubuntu-latest
@@ -214,9 +228,10 @@ jobs:
     # Approval gate is handled by GitHub Environments, not tags.
     environment: 
       name: staging
-      url: https://${{ needs.terraform-apply.outputs.staging_storage_account || vars.STAGING_STORAGE_ACCOUNT }}.web.core.windows.net/${{ env.STAGING_PATH }}/approve.html
+      url: ${{ needs.terraform-apply.outputs.staging_site_url || format('https://{0}.web.core.windows.net/{1}/', vars.STAGING_STORAGE_ACCOUNT, env.STAGING_PATH) }}approve.html
     env:
       STAGING_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.staging_storage_account || vars.STAGING_STORAGE_ACCOUNT }}
+      STAGING_SITE_URL: ${{ needs.terraform-apply.outputs.staging_site_url }}
     steps:
       - name: Download build artifact
         uses: actions/download-artifact@v4
@@ -246,8 +261,8 @@ jobs:
 
       - name: Output staging URL
         run: |
-          STAGING_URL="https://${STAGING_STORAGE_ACCOUNT}.web.core.windows.net/${STAGING_PATH}/"
-          APPROVE_URL="https://${STAGING_STORAGE_ACCOUNT}.web.core.windows.net/${STAGING_PATH}/approve.html"
+          STAGING_URL="${STAGING_SITE_URL}"
+          APPROVE_URL="${STAGING_SITE_URL}/${STAGING_PATH}/approve.html"
           echo "Staging URL: ${STAGING_URL}"
           echo "Approvals URL: ${APPROVE_URL}"
           echo "### Staging URL" >> "$GITHUB_STEP_SUMMARY"
@@ -262,6 +277,7 @@ jobs:
     environment: production
     env:
       PROD_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.prod_storage_account || vars.PROD_STORAGE_ACCOUNT }}
+      PROD_SITE_URL: ${{ needs.terraform-apply.outputs.production_site_url }}
     steps:
       - name: Download build artifact
         uses: actions/download-artifact@v4
@@ -291,7 +307,7 @@ jobs:
 
       - name: Output production URL
         run: |
-          PROD_URL="https://${PROD_STORAGE_ACCOUNT}.web.core.windows.net/"
+          PROD_URL="${PROD_SITE_URL}"
           echo "Production URL: ${PROD_URL}"
           echo "### Production URL" >> "$GITHUB_STEP_SUMMARY"
           echo "${PROD_URL}" >> "$GITHUB_STEP_SUMMARY"
