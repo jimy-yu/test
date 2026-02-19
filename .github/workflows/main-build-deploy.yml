@@ -212,7 +212,9 @@ jobs:
     needs: [build, terraform-apply]
     if: ${{ needs.build.result == 'success' && (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
     # Approval gate is handled by GitHub Environments, not tags.
-    environment: staging
+    environment: 
+      name: staging
+      url: https://${{ needs.terraform-apply.outputs.staging_storage_account }}.web.core.windows.net/${{ env.STAGING_PATH }}/approve.html
     env:
       STAGING_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.staging_storage_account || vars.STAGING_STORAGE_ACCOUNT }}
     steps:
