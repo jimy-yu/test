@@ -221,7 +221,6 @@ jobs:
           az storage blob upload-batch \
             --account-name "${STAGING_STORAGE_ACCOUNT}" \
             --destination '$web' \
-            --destination-path "${STAGING_PATH}" \
             --source "./public" \
             --auth-mode login \
             --overwrite
