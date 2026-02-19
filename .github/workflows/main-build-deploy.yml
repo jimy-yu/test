@@ -26,21 +26,6 @@ env:
   NODE_OPTIONS: "--openssl-legacy-provider"
 
 jobs:
-  # terraform-validate:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Checkout challenge repo
-  #       uses: actions/checkout@v4
-
-  #     - name: Setup Terraform
-  #       uses: hashicorp/setup-terraform@v3
-  #       with:
-  #         terraform_version: "1.6.6"
-
-  #     - name: Terraform fmt
-  #       working-directory: infra
-  #       run: terraform fmt -check
-
   terraform-plan:
     runs-on: ubuntu-latest
     # needs: terraform-validate
@@ -57,10 +42,6 @@ jobs:
       TFSTATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER }}
       TFSTATE_KEY: ${{ vars.TFSTATE_KEY }}
     steps:
-      - name: Terraform fmt
-        working-directory: infra
-        run: terraform fmt -check
-
       - name: Checkout challenge repo
         uses: actions/checkout@v4
 
@@ -76,6 +57,9 @@ jobs:
         with:
           terraform_version: "1.6.6"
 
+      - name: Terraform fmt
+        working-directory: infra
+        run: terraform fmt -check
       - name: Terraform plan
         working-directory: infra
         run: |
