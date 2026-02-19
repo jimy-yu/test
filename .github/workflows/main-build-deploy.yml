@@ -52,7 +52,7 @@ jobs:
   terraform-plan:
     runs-on: ubuntu-latest
     needs: terraform-validate
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.terraform_plan == 'true' || github.event.inputs.terraform_apply == 'true') }}
+    if: ${{ github.event_name == 'push' }}
     # Use a non-approval environment so plan can run before manual approval.
     environment: infra-plan
     outputs:
@@ -119,7 +119,7 @@ jobs:
   terraform-apply:
     runs-on: ubuntu-latest
     needs: terraform-plan
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.terraform_apply == 'true' && needs.terraform-plan.outputs.has_changes == 'true' }}
+    if: ${{ github.event_name == 'push' && needs.terraform-plan.outputs.has_changes == 'true' }}
     # Manual approval via GitHub Environment. Use remote state in production.
     environment: infra
     outputs:
