@@ -49,18 +49,14 @@ jobs:
         working-directory: infra
         run: terraform fmt -check
 
-      - name: Terraform validate
-        working-directory: infra
-        run: |
-          terraform init -backend=false
-          terraform validate
-
   terraform-plan:
     runs-on: ubuntu-latest
     needs: terraform-validate
     if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.terraform_plan == 'true' || github.event.inputs.terraform_apply == 'true') }}
     # Use a non-approval environment so plan can run before manual approval.
     environment: infra-plan
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
     env:
       ARM_USE_OIDC: "true"
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -87,10 +83,11 @@ jobs:
           terraform_version: "1.6.6"
 
       - name: Terraform plan
+        id: plan
         working-directory: infra
         run: |
           if [ -z "${TFSTATE_RESOURCE_GROUP}" ] || [ -z "${TFSTATE_STORAGE_ACCOUNT}" ] || [ -z "${TFSTATE_CONTAINER}" ] || [ -z "${TFSTATE_KEY}" ]; then
-            echo "TFSTATE_* secrets are required for remote state."
+            echo "TFSTATE_* variables are required for remote state (repo or environment variables)."
             exit 1
           fi
           terraform init \
@@ -98,18 +95,31 @@ jobs:
             -backend-config="storage_account_name=${TFSTATE_STORAGE_ACCOUNT}" \
             -backend-config="container_name=${TFSTATE_CONTAINER}" \
             -backend-config="key=${TFSTATE_KEY}"
-          terraform plan -out=tfplan
+          terraform validate
+          set +e
+          terraform plan -out=tfplan -detailed-exitcode
+          exit_code=$?
+          if [ "$exit_code" -eq 0 ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$exit_code" -eq 2 ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            exit "$exit_code"
+          fi
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v4
         with:
           name: terraform-plan
           path: infra/tfplan
+        if: ${{ steps.plan.outputs.has_changes == 'true' }}
 
   terraform-apply:
     runs-on: ubuntu-latest
     needs: terraform-plan
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.terraform_apply == 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.terraform_apply == 'true' && needs.terraform-plan.outputs.has_changes == 'true' }}
     # Manual approval via GitHub Environment. Use remote state in production.
     environment: infra
     outputs:
@@ -150,7 +160,7 @@ jobs:
         working-directory: infra
         run: |
           if [ -z "${TFSTATE_RESOURCE_GROUP}" ] || [ -z "${TFSTATE_STORAGE_ACCOUNT}" ] || [ -z "${TFSTATE_CONTAINER}" ] || [ -z "${TFSTATE_KEY}" ]; then
-            echo "TFSTATE_* secrets are required for remote state."
+            echo "TFSTATE_* variables are required for remote state (repo or environment variables)."
             exit 1
           fi
           terraform init \
@@ -217,11 +227,11 @@ jobs:
   deploy-staging:
     runs-on: ubuntu-latest
     needs: [build, terraform-apply]
-    if: ${{ needs.terraform-apply.result == 'success' }}
+    if: ${{ needs.build.result == 'success' && (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
     # Approval gate is handled by GitHub Environments, not tags.
     environment: staging
     env:
-      STAGING_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.staging_storage_account }}
+      STAGING_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.staging_storage_account || vars.STAGING_STORAGE_ACCOUNT }}
     steps:
       - name: Download build artifact
         uses: actions/download-artifact@v4
@@ -239,7 +249,7 @@ jobs:
       - name: Deploy to staging static website
         run: |
           if [ -z "${STAGING_STORAGE_ACCOUNT}" ]; then
-            echo "STAGING_STORAGE_ACCOUNT output is empty."
+            echo "STAGING_STORAGE_ACCOUNT is empty. Set vars.STAGING_STORAGE_ACCOUNT or run terraform_apply."
             exit 1
           fi
           az storage blob upload-batch \
@@ -255,7 +265,7 @@ jobs:
     # Approval gate is handled by GitHub Environments, not tags.
     environment: production
     env:
-      PROD_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.prod_storage_account }}
+      PROD_STORAGE_ACCOUNT: ${{ needs.terraform-apply.outputs.prod_storage_account || vars.PROD_STORAGE_ACCOUNT }}
     steps:
       - name: Download build artifact
         uses: actions/download-artifact@v4
@@ -273,7 +283,7 @@ jobs:
       - name: Deploy to production static website
         run: |
           if [ -z "${PROD_STORAGE_ACCOUNT}" ]; then
-            echo "PROD_STORAGE_ACCOUNT output is empty."
+            echo "PROD_STORAGE_ACCOUNT is empty. Set vars.PROD_STORAGE_ACCOUNT or run terraform_apply."
             exit 1
           fi
           az storage blob upload-batch \
